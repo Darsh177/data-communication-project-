@@ -4,6 +4,8 @@ using System.Text;
 
 class HotelClient
 {
+    static string currentRole = "", currentUname = "";
+
     static void Main()
     {
         try
@@ -11,85 +13,109 @@ class HotelClient
             using (TcpClient client = new TcpClient("127.0.0.1", 8000))
             using (NetworkStream stream = client.GetStream())
             {
-                // بنعمل Clear مرة واحدة بس في بداية تشغيل البرنامج
-                Console.Clear();
-                Console.WriteLine("=== WELCOME TO HOTEL SECURE SYSTEM ===");
-
                 while (true)
                 {
-                    // طباعة المنيو تحت البيانات السابقة
-                    Console.WriteLine("\n-------------------------------");
-                    Console.WriteLine("MAIN MENU:");
-                    Console.WriteLine("1. View Available Rooms & Schedule");
-                    Console.WriteLine("2. Book a Room Immediately");
-                    Console.WriteLine("3. Exit");
-                    Console.Write("Your Choice: ");
-
-                    string choice = Console.ReadLine();
-
-                    if (choice == "1")
+                    if (string.IsNullOrEmpty(currentRole))
                     {
-                        // طلب العرض
-                        Send(stream, "VIEW");
-                        string response = Receive(stream);
-
-                        // بنطبع الجدول مباشرة
-                        Console.WriteLine(response);
-                        Console.WriteLine("\n[Schedule Displayed Above] - Press Enter to show Menu again...");
-                        Console.ReadLine();
-                        // هنا مش هنعمل Clear، فالمنيو هتنطبع تحت الجدول في اللفة الجاية
-                    }
-                    else if (choice == "2")
-                    {
-                        Console.WriteLine("\n--- Fast Booking ---");
-                        Console.Write("Room Number: "); string r = Console.ReadLine();
-                        Console.Write("Start Day (1-7): "); string sd = Console.ReadLine();
-                        Console.Write("Start Period (1-3): "); string sp = Console.ReadLine();
-                        Console.Write("End Day (1-7): "); string ed = Console.ReadLine();
-                        Console.Write("End Period (1-3): "); string ep = Console.ReadLine();
-
-                        Send(stream, $"BOOK:{r}:{sd}:{sp}:{ed}:{ep}");
-                        string response = Receive(stream);
-
-                        Console.ForegroundColor = response.Contains("SUCCESS") ? ConsoleColor.Green : ConsoleColor.Red;
-                        Console.WriteLine("\nServer Response: " + response);
-                        Console.ResetColor();
-
-                        Console.Write("\nPress Enter to continue...");
-                        Console.ReadLine();
-                    }
-                    else if (choice == "3")
-                    {
-                        Send(stream, "EXIT");
-                        break;
+                        Console.WriteLine("\n--- MAIN MENU ---\n[1] Login [2] Signup [3] Exit System");
+                        string c = Console.ReadLine();
+                        if (c == "3") return;
+                        Console.Write("Username: "); string u = Console.ReadLine();
+                        Console.Write("Password: "); string p = Console.ReadLine();
+                        Send(stream, (c == "1" ? "LOGIN:" : "SIGNUP:") + u + ":" + p);
+                        string res = Receive(stream);
+                        if (res.StartsWith("SUCCESS"))
+                        {
+                            var pts = res.Split(':'); currentRole = pts[1]; currentUname = pts[2];
+                        }
+                        Console.WriteLine("Server: " + res);
                     }
                     else
                     {
-                        Console.WriteLine("Invalid choice! Try again.");
+                        bool logout = currentRole == "Admin" ? AdminMenu(stream) : UserMenu(stream);
+                        if (logout) { currentRole = ""; currentUname = ""; }
                     }
                 }
             }
         }
-        catch (Exception ex)
+        catch { Console.WriteLine("Connection Lost."); }
+    }
+
+    static bool UserMenu(NetworkStream s)
+    {
+        Console.WriteLine($"\n--- {currentUname} (USER) ---\n1. View Rooms\n2. Book Room\n3. Cancel/Change Booking\n4. Logout");
+        string c = Console.ReadLine();
+        if (c == "4") return true;
+        if (c == "1") { Send(s, "VIEW"); Console.WriteLine(Receive(s)); }
+        else if (c == "2") { PerformBooking(s); }
+        else if (c == "3")
         {
-            Console.WriteLine("\n[!] Connection Lost: " + ex.Message);
+            Console.Write("Room Number to Manage: "); string r = Console.ReadLine();
+            Console.WriteLine("Option: [1] Cancel Completely [2] Change Time (Edit) [3] Back");
+            string opt = Console.ReadLine();
+            if (opt == "1") { Send(s, $"CANCEL_ALL:{r}:{currentUname}"); Console.WriteLine(Receive(s)); }
+            else if (opt == "2")
+            {
+                Send(s, $"CANCEL_ALL:{r}:{currentUname}"); // مسح القديم
+                if (Receive(s).Contains("SUCCESS"))
+                {
+                    Console.WriteLine("Old booking cleared. Enter new times:");
+                    PerformBooking(s); // طلب الجديد
+                }
+            }
         }
-
-        Console.WriteLine("\nApplication Closed. Press any key...");
-        Console.ReadKey();
+        return false;
     }
 
-    // دوال المساعدة للارسال والاستقبال
-    static void Send(NetworkStream s, string m)
+    static void PerformBooking(NetworkStream s)
     {
-        byte[] d = Encoding.UTF8.GetBytes(m);
-        s.Write(d, 0, d.Length);
+        bool confirmed = false;
+        while (!confirmed)
+        {
+            Console.WriteLine("\n>> Booking Details <<");
+            Console.Write("Room Number: "); string r = Console.ReadLine();
+            Console.Write("Start Day (1-7): "); int sd = int.Parse(Console.ReadLine());
+            Console.Write("Start Period (1-3): "); int sp = int.Parse(Console.ReadLine());
+            Console.Write("End Day (1-7): "); int ed = int.Parse(Console.ReadLine());
+            Console.Write("End Period (1-3): "); int ep = int.Parse(Console.ReadLine());
+
+            // حساب السعر التقديري
+            int price = r.StartsWith("2") ? 200 : (r.StartsWith("3") ? 300 : 100);
+            int totalP = ((ed - sd) * 3) + (ep - sp + 1);
+            int totalCost = totalP * price;
+
+            Console.WriteLine($"\nSUMMARY: Room {r} | Duration: {totalP} periods | Total: ${totalCost}");
+            Console.Write("[1] Confirm [2] Re-enter [3] Back: ");
+            string choice = Console.ReadLine();
+            if (choice == "1")
+            {
+                Send(s, $"BOOK:{r}:{currentUname}:{sd}:{sp}:{ed}:{ep}");
+                Console.WriteLine("Server: " + Receive(s)); confirmed = true;
+            }
+            else if (choice == "3") confirmed = true;
+        }
     }
 
-    static string Receive(NetworkStream s)
+    static bool AdminMenu(NetworkStream s)
     {
-        byte[] b = new byte[4096];
-        int r = s.Read(b, 0, b.Length);
-        return Encoding.UTF8.GetString(b, 0, r).Trim();
+        Console.WriteLine($"\n--- {currentUname} (ADMIN) ---\n1. Full Report\n2. View Available\n3. Add Room\n4. List Users\n5. Edit User\n6. Delete User\n7. Logout");
+        string c = Console.ReadLine();
+        if (c == "7") return true;
+        if (c == "1") { Send(s, "VIEW"); Console.WriteLine(Receive(s)); }
+        else if (c == "2") { Send(s, "VIEW_AVAILABLE"); Console.WriteLine(Receive(s)); }
+        else if (c == "4") { Send(s, "LISTUSERS"); Console.WriteLine(Receive(s)); }
+        else if (c == "5")
+        {
+            Console.Write("User ID: "); string id = Console.ReadLine();
+            Console.Write("New Name: "); string n = Console.ReadLine();
+            Console.Write("New Pass: "); string p = Console.ReadLine();
+            Console.Write("New Role: "); string r = Console.ReadLine();
+            Send(s, $"UPDATEUSER:{id}:{n}:{p}:{r}"); Console.WriteLine(Receive(s));
+        }
+        else if (c == "6") { Console.Write("User ID: "); Send(s, "DELETEUSER:" + Console.ReadLine()); Console.WriteLine(Receive(s)); }
+        return false;
     }
+
+    static void Send(NetworkStream s, string m) { byte[] d = Encoding.UTF8.GetBytes(m); s.Write(d, 0, d.Length); }
+    static string Receive(NetworkStream s) { byte[] b = new byte[10000]; int r = s.Read(b, 0, b.Length); return r > 0 ? Encoding.UTF8.GetString(b, 0, r).Trim() : ""; }
 }
