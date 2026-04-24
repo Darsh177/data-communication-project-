@@ -9,48 +9,59 @@ using System.Linq;
 
 class HotelServer
 {
-    private const string DataFile = "hotel_schedule.txt";
-    static Dictionary<string, bool[,]> roomSchedules = new Dictionary<string, bool[,]>();
+    private const string UsersFile = "users.txt";
+    private const string RoomsFile = "rooms_data.txt";
+    static List<User> users = new List<User>();
+    static List<Room> rooms = new List<Room>();
     static object fileLock = new object();
+
+    class User { public int Id; public string Username, Password, Role; }
+    class Room
+    {
+        public string Number, Type; public int Price;
+        public string[,] Schedule = new string[7, 3];
+    }
 
     static void Main()
     {
-        LoadData();
+        LoadUsers(); LoadRooms();
         TcpListener server = new TcpListener(IPAddress.Any, 8000);
         server.Start();
-        Console.WriteLine("Hotel Server Active... Waiting for Choices.");
-
+        Console.WriteLine("=== HOTEL SERVER PRO ACTIVE [PORT 8000] ===");
         while (true)
         {
-            TcpClient client = server.AcceptTcpClient();
-            new Thread(() => HandleClient(client)).Start();
+            try
+            {
+                TcpClient client = server.AcceptTcpClient();
+                new Thread(() => HandleClient(client)).Start();
+            }
+            catch { }
         }
     }
 
     static void HandleClient(TcpClient client)
     {
-        using (client)
-        using (NetworkStream stream = client.GetStream())
+        using (client) using (NetworkStream stream = client.GetStream())
         {
             while (true)
             {
                 try
                 {
-                    // استقبال الطلب من الكلينت (VIEW أو BOOK)
                     string request = Receive(stream);
-                    if (request == "EXIT" || string.IsNullOrEmpty(request)) break;
-
-                    if (request == "VIEW")
+                    if (string.IsNullOrEmpty(request) || request == "EXIT") break;
+                    string[] p = request.Split(':');
+                    switch (p[0])
                     {
-                        // إرسال حالة الغرف فقط
-                        string status = GetStatusReport();
-                        Send(stream, status);
-                    }
-                    else if (request.StartsWith("BOOK:"))
-                    {
-                        // معالجة عملية الحجز
-                        string result = ProcessBooking(request);
-                        Send(stream, result);
+                        case "SIGNUP": Send(stream, ProcessSignUp(p[1], p[2])); break;
+                        case "LOGIN": Send(stream, ProcessLogin(p[1], p[2])); break;
+                        case "VIEW": Send(stream, GetStatusReport(false)); break;
+                        case "VIEW_AVAILABLE": Send(stream, GetStatusReport(true)); break;
+                        case "BOOK": Send(stream, ProcessBooking(p[1], p[2], int.Parse(p[3]), int.Parse(p[4]), int.Parse(p[5]), int.Parse(p[6]))); break;
+                        case "CANCEL_ALL": Send(stream, CancelAllUserBooking(p[1], p[2])); break;
+                        case "ADDROOM": Send(stream, AddRoom(p[1], p[2])); break;
+                        case "LISTUSERS": Send(stream, string.Join("\n", users.Select(u => $"ID: {u.Id} | Name: {u.Username} | Role: {u.Role}"))); break;
+                        case "UPDATEUSER": Send(stream, UpdateUser(p[1], p[2], p[3], p[4])); break;
+                        case "DELETEUSER": users.RemoveAll(u => u.Id.ToString() == p[1]); SaveUsers(); Send(stream, "SUCCESS: Deleted"); break;
                     }
                 }
                 catch { break; }
@@ -58,101 +69,114 @@ class HotelServer
         }
     }
 
-    static string GetStatusReport()
+    static string ProcessSignUp(string u, string p)
     {
-        string report = "\n--- Current Room Availability (7 Days x 3 Periods) ---\n";
-        foreach (var room in roomSchedules)
+        lock (users)
         {
-            report += $"\nRoom {room.Key}:\n";
+            if (users.Any(x => x.Username == u)) return "FAILED: Taken";
+            users.Add(new User { Id = users.Count + 1, Username = u, Password = p, Role = users.Count == 0 ? "Admin" : "User" });
+            SaveUsers(); return "SUCCESS: Registered";
+        }
+    }
+
+    static string ProcessLogin(string u, string p)
+    {
+        var user = users.FirstOrDefault(x => x.Username == u && x.Password == p);
+        return user != null ? $"SUCCESS:{user.Role}:{user.Username}" : "FAILED: Invalid";
+    }
+
+    static string CancelAllUserBooking(string rNo, string uname)
+    {
+        var room = rooms.FirstOrDefault(r => r.Number == rNo);
+        if (room == null) return "FAILED: Room not found";
+        bool found = false;
+        for (int i = 0; i < 7; i++)
+            for (int j = 0; j < 3; j++)
+                if (room.Schedule[i, j] == uname) { room.Schedule[i, j] = null; found = true; }
+        if (found) { SaveRooms(); return "SUCCESS: Cleared"; }
+        return "FAILED: No bookings found";
+    }
+
+    static string ProcessBooking(string rNo, string uname, int sD, int sP, int eD, int eP)
+    {
+        var room = rooms.FirstOrDefault(r => r.Number == rNo);
+        if (room == null) return "FAILED";
+        for (int d = sD - 1; d <= eD - 1; d++)
+        {
+            int start = (d == sD - 1) ? sP - 1 : 0;
+            int end = (d == eD - 1) ? eP - 1 : 2;
+            for (int p = start; p <= end; p++) if (!string.IsNullOrEmpty(room.Schedule[d, p])) return "FAILED: Occupied";
+        }
+        for (int d = sD - 1; d <= eD - 1; d++)
+        {
+            int start = (d == sD - 1) ? sP - 1 : 0;
+            int end = (d == eD - 1) ? eP - 1 : 2;
+            for (int p = start; p <= end; p++) room.Schedule[d, p] = uname;
+        }
+        SaveRooms(); return "SUCCESS: Booked";
+    }
+
+    static string AddRoom(string n, string t)
+    {
+        if (rooms.Any(r => r.Number == n)) return "FAILED: Exists";
+        rooms.Add(new Room { Number = n, Type = t, Price = t == "Sweet" ? 300 : (t == "VIP" ? 200 : 100) });
+        SaveRooms(); return "SUCCESS";
+    }
+
+    static string UpdateUser(string id, string n, string p, string r)
+    {
+        var u = users.FirstOrDefault(x => x.Id.ToString() == id);
+        if (u == null) return "FAILED";
+        u.Username = n; u.Password = p; u.Role = r; SaveUsers(); return "SUCCESS";
+    }
+
+    static string GetStatusReport(bool onlyAvail)
+    {
+        StringBuilder sb = new StringBuilder();
+        foreach (var r in rooms.OrderBy(x => x.Number))
+        {
+            bool hasSpace = false;
+            StringBuilder temp = new StringBuilder();
+            temp.AppendLine($"Room {r.Number} [{r.Type}] - ${r.Price}/Period");
             for (int d = 0; d < 7; d++)
             {
-                report += $" Day {d + 1}: ";
+                temp.Append($" Day {d + 1}: ");
                 for (int p = 0; p < 3; p++)
-                    report += room.Value[d, p] ? "[X] " : "[A] ";
-                report += "\n";
-            }
-        }
-        return report;
-    }
-
-    static string ProcessBooking(string request)
-    {
-        try
-        {
-            string[] p = request.Split(':');
-            string rNo = p[1];
-            int sD = int.Parse(p[2]) - 1, sP = int.Parse(p[3]) - 1;
-            int eD = int.Parse(p[4]) - 1, eP = int.Parse(p[5]) - 1;
-
-            if (sD < 0 || eD > 6 || sP < 0 || eP > 2 || (sD > eD) || (sD == eD && sP > eP))
-                return "FAILED: Invalid time range.";
-
-            lock (roomSchedules)
-            {
-                if (CheckAvailability(rNo, sD, sP, eD, eP))
                 {
-                    BookPeriod(rNo, sD, sP, eD, eP);
-                    SaveData();
-                    return "SUCCESS: Reservation saved.";
+                    bool isFree = string.IsNullOrEmpty(r.Schedule[d, p]);
+                    if (isFree) hasSpace = true;
+                    temp.Append(isFree ? "[A] " : $"[{r.Schedule[d, p]}] ");
                 }
-                return "FAILED: Room is already booked for these periods.";
+                temp.AppendLine();
             }
+            if (!onlyAvail || hasSpace) sb.Append(temp.ToString());
         }
-        catch { return "ERROR: Data format error."; }
+        return sb.ToString();
     }
 
-    // --- نفس دوال الـ CheckAvailability و BookPeriod و SaveData من الكود السابق ---
-    static bool CheckAvailability(string rNo, int sD, int sP, int eD, int eP)
-    {
-        if (!roomSchedules.ContainsKey(rNo)) return false;
-        for (int d = sD; d <= eD; d++)
-        {
-            int startP = (d == sD) ? sP : 0;
-            int endP = (d == eD) ? eP : 2;
-            for (int p = startP; p <= endP; p++) if (roomSchedules[rNo][d, p]) return false;
-        }
-        return true;
-    }
-
-    static void BookPeriod(string rNo, int sD, int sP, int eD, int eP)
-    {
-        for (int d = sD; d <= eD; d++)
-        {
-            int startP = (d == sD) ? sP : 0;
-            int endP = (d == eD) ? eP : 2;
-            for (int p = startP; p <= endP; p++) roomSchedules[rNo][d, p] = true;
-        }
-    }
-
-    static void LoadData()
-    {
-        if (File.Exists(DataFile))
-        {
-            foreach (var line in File.ReadAllLines(DataFile))
-            {
-                var parts = line.Split('|');
-                bool[,] sch = new bool[7, 3];
-                var data = parts[1].Split(',');
-                int k = 0;
-                for (int i = 0; i < 7; i++) for (int j = 0; j < 3; j++) sch[i, j] = bool.Parse(data[k++]);
-                roomSchedules[parts[0]] = sch;
-            }
-        }
-        else
-        {
-            for (int i = 101; i <= 103; i++) roomSchedules[i.ToString()] = new bool[7, 3];
-            SaveData();
-        }
-    }
-
-    static void SaveData()
+    static void SaveUsers() { lock (fileLock) File.WriteAllLines(UsersFile, users.Select(u => $"{u.Id}|{u.Username}|{u.Password}|{u.Role}")); }
+    static void LoadUsers() { if (File.Exists(UsersFile)) users = File.ReadAllLines(UsersFile).Select(l => { var p = l.Split('|'); return new User { Id = int.Parse(p[0]), Username = p[1], Password = p[2], Role = p[3] }; }).ToList(); }
+    static void SaveRooms()
     {
         lock (fileLock)
         {
-            File.WriteAllLines(DataFile, roomSchedules.Select(r => $"{r.Key}|{string.Join(",", r.Value.Cast<bool>())}"));
+            var lines = rooms.Select(r => {
+                string s = ""; for (int i = 0; i < 7; i++) for (int j = 0; j < 3; j++) s += (r.Schedule[i, j] ?? "NULL") + ",";
+                return $"{r.Number}|{r.Type}|{r.Price}|{s.TrimEnd(',')}";
+            });
+            File.WriteAllLines(RoomsFile, lines);
         }
     }
-
+    static void LoadRooms()
+    {
+        if (!File.Exists(RoomsFile)) return;
+        rooms = File.ReadAllLines(RoomsFile).Select(l => {
+            var p = l.Split('|'); var r = new Room { Number = p[0], Type = p[1], Price = int.Parse(p[2]) };
+            var s = p[3].Split(','); int k = 0;
+            for (int i = 0; i < 7; i++) for (int j = 0; j < 3; j++) r.Schedule[i, j] = s[k++] == "NULL" ? null : s[k - 1];
+            return r;
+        }).ToList();
+    }
     static void Send(NetworkStream s, string m) { byte[] d = Encoding.UTF8.GetBytes(m); s.Write(d, 0, d.Length); }
-    static string Receive(NetworkStream s) { byte[] b = new byte[2048]; int r = s.Read(b, 0, b.Length); return Encoding.UTF8.GetString(b, 0, r).Trim().ToUpper(); }
+    static string Receive(NetworkStream s) { byte[] b = new byte[10000]; int r = s.Read(b, 0, b.Length); return r > 0 ? Encoding.UTF8.GetString(b, 0, r).Trim() : ""; }
 }
